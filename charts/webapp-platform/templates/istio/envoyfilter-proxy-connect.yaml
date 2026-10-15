@@ -1,0 +1,72 @@
+{{- /*
+HTTP CONNECT tunnelling through the corporate proxy, at the egress gateway.
+
+Gated by istio.enabled like every other Istio object: an ungated EnvoyFilter
+is rendered even when the mesh is off, and either fails to apply (missing CRD)
+or silently patches a gateway that does not serve this application.
+
+Istio has no first-class API for "originate TLS, then tunnel it through an
+HTTP/1.1 proxy". Envoy does: the http_11_proxy transport socket wraps the
+upstream TLS socket and issues "CONNECT host:443" to the proxy first.
+The patch replaces the transport socket of the partner cluster on the egress
+gateway with http_11_proxy(tls), re-declaring the SDS-backed client cert that
+Istio generated from credentialName.
+
+Requires an Envoy build exposing Http11ProxyUpstreamTransport.default_proxy_address
+(recent Istio releases). Validate on your mesh version before production.
+*/}}
+{{- if .Values.istio.enabled }}
+{{- $i := .Values.istio }}
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: {{ include "webapp.fullname" . }}-{{ $i.partner.name }}-proxy-connect
+  # Must live in the egress gateway namespace to select its pods.
+  namespace: {{ $i.egressGateway.namespace }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  workloadSelector:
+    labels:
+      {{- toYaml $i.egressGateway.selector | nindent 6 }}
+  configPatches:
+    - applyTo: CLUSTER
+      match:
+        context: GATEWAY
+        cluster:
+          service: {{ $i.partner.host }}
+          portNumber: {{ $i.partner.port }}
+      patch:
+        operation: MERGE
+        value:
+          transport_socket:
+            name: envoy.transport_sockets.http_11_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.http_11_proxy.v3.Http11ProxyUpstreamTransport
+              default_proxy_address:
+                socket_address:
+                  address: {{ $i.corporateProxy.address }}
+                  port_value: {{ $i.corporateProxy.port }}
+              transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+                  sni: {{ $i.partner.host }}
+                  common_tls_context:
+                    tls_certificate_sds_secret_configs:
+                      - name: kubernetes://{{ $i.partner.credentialName }}
+                        sds_config:
+                          ads: {}
+                          resource_api_version: V3
+                    combined_validation_context:
+                      default_validation_context:
+                        match_typed_subject_alt_names:
+                          - san_type: DNS
+                            matcher:
+                              exact: {{ $i.partner.host }}
+                      validation_context_sds_secret_config:
+                        name: kubernetes://{{ $i.partner.credentialName }}-cacert
+                        sds_config:
+                          ads: {}
+                          resource_api_version: V3
+{{- end }}

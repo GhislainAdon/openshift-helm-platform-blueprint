@@ -1,0 +1,25 @@
+{{- if .Values.istio.enabled }}
+{{- $ctx := dict "root" $ "component" "backend" }}
+# Lock the backend's sidecar down: only hosts declared in the mesh registry
+# (Services + ServiceEntries) are reachable. Anything else gets a 502 from the
+# sidecar (BlackHoleCluster) instead of silently leaving the cluster.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: {{ include "webapp.componentName" $ctx }}-egress
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  workloadSelector:
+    labels:
+      {{- include "webapp.componentSelectorLabels" $ctx | nindent 6 }}
+  egress:
+    - hosts:
+        - "./*"
+        - "{{ .Values.istio.controlPlaneNamespace }}/*"
+        {{- if ne .Values.istio.egressGateway.namespace .Values.istio.controlPlaneNamespace }}
+        - "{{ .Values.istio.egressGateway.namespace }}/*"
+        {{- end }}
+  outboundTrafficPolicy:
+    mode: {{ .Values.istio.sidecar.outboundTrafficPolicy }}
+{{- end }}

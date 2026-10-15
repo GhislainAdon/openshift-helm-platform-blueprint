@@ -1,0 +1,120 @@
+{{- if .Values.istio.enabled }}
+{{- $i := .Values.istio }}
+{{- $fullname := include "webapp.fullname" . }}
+{{- $gwHost := printf "%s.%s.svc.cluster.local" $i.egressGateway.service $i.egressGateway.namespace }}
+{{- $gwName := printf "%s-%s-egress" $fullname $i.partner.name }}
+{{- $subset := $i.partner.name }}
+# -----------------------------------------------------------------------------
+# Egress path for the partner API
+#
+#   backend --(http :80)--> sidecar --(ISTIO_MUTUAL :443)--> egress gateway
+#     --(mTLS with client cert, tunnelled in HTTP CONNECT)--> corporate proxy
+#     --> partner-api :443
+# -----------------------------------------------------------------------------
+
+# 1. Egress gateway listener: accepts mesh-internal mTLS for the partner host.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gwName }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- toYaml $i.egressGateway.selector | nindent 4 }}
+  servers:
+    - port:
+        number: {{ $i.egressGateway.port }}
+        name: https-{{ $i.partner.name }}
+        protocol: HTTPS
+      hosts:
+        - {{ $i.partner.host }}
+      tls:
+        mode: ISTIO_MUTUAL
+---
+# 2. Sidecar -> egress gateway leg uses Istio mTLS (SPIFFE identities).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $fullname }}-egressgateway-{{ $i.partner.name }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  host: {{ $gwHost }}
+  exportTo:
+    - "."
+  subsets:
+    - name: {{ $subset }}
+      trafficPolicy:
+        portLevelSettings:
+          - port:
+              number: {{ $i.egressGateway.port }}
+            tls:
+              mode: ISTIO_MUTUAL
+              sni: {{ $i.partner.host }}
+---
+# 3. Routing: mesh traffic for the partner goes to the egress gateway; the
+#    gateway forwards it to the partner's TLS port.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ $fullname }}-{{ $i.partner.name }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ $i.partner.host }}
+  gateways:
+    - mesh
+    - {{ $gwName }}
+  http:
+    - name: mesh-to-egress-gateway
+      match:
+        - gateways:
+            - mesh
+          port: 80
+      route:
+        - destination:
+            host: {{ $gwHost }}
+            subset: {{ $subset }}
+            port:
+              number: {{ $i.egressGateway.port }}
+    - name: egress-gateway-to-partner
+      match:
+        - gateways:
+            - {{ $gwName }}
+          port: {{ $i.egressGateway.port }}
+      route:
+        - destination:
+            host: {{ $i.partner.host }}
+            port:
+              number: {{ $i.partner.port }}
+      timeout: 30s
+      retries:
+        attempts: 2
+        perTryTimeout: 10s
+        retryOn: connect-failure,refused-stream,503
+---
+# 4. TLS origination at the egress gateway: mutual TLS to the partner with the
+#    client certificate stored in a Kubernetes Secret (credentialName) living
+#    in the egress gateway namespace. The application never sees the key.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $fullname }}-{{ $i.partner.name }}-mtls
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  host: {{ $i.partner.host }}
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        connectTimeout: 5s
+    portLevelSettings:
+      - port:
+          number: {{ $i.partner.port }}
+        tls:
+          mode: MUTUAL
+          credentialName: {{ $i.partner.credentialName }}
+          sni: {{ $i.partner.host }}
+{{- end }}

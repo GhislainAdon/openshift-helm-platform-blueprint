@@ -1,0 +1,45 @@
+{{- if .Values.istio.enabled }}
+{{- $i := .Values.istio }}
+# External partner API. Port 80 is what the application calls (plain HTTP
+# inside the mesh); port 443 is what the egress gateway uses after TLS origination.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: {{ include "webapp.fullname" . }}-{{ $i.partner.name }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ $i.partner.host }}
+  location: MESH_EXTERNAL
+  resolution: {{ $i.partner.resolution }}
+  ports:
+    - number: 80
+      name: http
+      protocol: HTTP
+    - number: {{ $i.partner.port }}
+      name: https
+      protocol: HTTPS
+  {{- if eq $i.partner.resolution "STATIC" }}
+  # Only the corporate proxy can resolve the partner: point the endpoint at it.
+  endpoints:
+    - address: {{ $i.corporateProxy.address }}
+  {{- end }}
+---
+# Corporate HTTP proxy: the only way out of the cluster network.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: {{ include "webapp.fullname" . }}-corporate-proxy
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ $i.corporateProxy.host }}
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: {{ $i.corporateProxy.port }}
+      name: tcp-proxy
+      protocol: TCP
+{{- end }}
