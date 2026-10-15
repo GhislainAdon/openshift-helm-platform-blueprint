@@ -1,0 +1,153 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+{{- $t := .Values.monitoring.prometheusRule.thresholds }}
+{{- $ns := .Release.Namespace }}
+{{- $fullname := include "webapp.fullname" . }}
+{{- $env := .Values.global.environment }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $fullname }}.availability
+      rules:
+        - alert: WebappHighHttp5xxRate
+          expr: |
+            (
+              sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}", status_code=~"5.."}[5m]))
+              /
+              sum(rate(http_request_duration_seconds_count{namespace="{{ $ns }}"}[5m]))
+            ) * 100 > {{ $t.errorRatePercent }}
+          for: 10m
+          labels:
+            severity: critical
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "Backend 5xx ratio above {{ $t.errorRatePercent }}%"
+            description: "{{ "{{" }} $value | printf \"%.2f\" {{ "}}" }}% of backend requests return 5xx in {{ $ns }}."
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#high-5xx-rate
+
+        - alert: WebappHighLatencyP95
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{namespace="{{ $ns }}"}[5m]))
+            ) > {{ $t.latencyP95Seconds }}
+          for: 10m
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "Backend p95 latency above {{ $t.latencyP95Seconds }}s"
+            description: "p95 latency is {{ "{{" }} $value | humanizeDuration {{ "}}" }} in {{ $ns }}."
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#high-latency
+
+        - alert: WebappNginxDown
+          expr: min(nginx_up{namespace="{{ $ns }}"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "nginx exporter reports the frontend as down"
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#frontend-down
+
+        - alert: WebappMongoDBDown
+          expr: |
+            max(mongodb_up{namespace="{{ $ns }}"}) == 0
+              or absent(mongodb_up{namespace="{{ $ns }}"})
+          for: 5m
+          labels:
+            severity: critical
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "MongoDB is unreachable"
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#mongodb-down
+
+    - name: {{ $fullname }}.workloads
+      rules:
+        - alert: WebappPodRestarting
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ $ns }}", pod=~"{{ $fullname }}-.*"}[30m]) > {{ $t.restartsPer30m }}
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "Container restarting repeatedly"
+            description: "{{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} restarted more than {{ $t.restartsPer30m }} times in 30 minutes."
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#crashloop
+
+        - alert: WebappDeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas{namespace="{{ $ns }}", deployment=~"{{ $fullname }}-.*"}
+              != kube_deployment_status_replicas_available{namespace="{{ $ns }}", deployment=~"{{ $fullname }}-.*"}
+          for: 15m
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "Deployment {{ "{{" }} $labels.deployment {{ "}}" }} has unavailable replicas"
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#replicas-mismatch
+
+        - alert: WebappHPAAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="{{ $ns }}", horizontalpodautoscaler=~"{{ $fullname }}-.*"}
+              >= kube_horizontalpodautoscaler_spec_max_replicas{namespace="{{ $ns }}", horizontalpodautoscaler=~"{{ $fullname }}-.*"}
+          for: {{ $t.hpaAtMaxForMinutes }}m
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "HPA {{ "{{" }} $labels.horizontalpodautoscaler {{ "}}" }} pinned at max replicas"
+            description: "Capacity ceiling reached for {{ $t.hpaAtMaxForMinutes }} minutes: raise maxReplicas or investigate load."
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#hpa-at-max
+
+        - alert: WebappPVCAlmostFull
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="{{ $ns }}", persistentvolumeclaim=~"data-{{ $fullname }}-.*"}
+              / kubelet_volume_stats_capacity_bytes{namespace="{{ $ns }}", persistentvolumeclaim=~"data-{{ $fullname }}-.*"}
+              * 100 < {{ $t.pvcFreePercent }}
+          for: 15m
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "MongoDB volume has less than {{ $t.pvcFreePercent }}% free space"
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#pvc-full
+
+    - name: {{ $fullname }}.certificates
+      rules:
+        # Requires a blackbox-exporter Probe on the public host.
+        - alert: WebappCertificateExpiringSoon
+          expr: |
+            (probe_ssl_earliest_cert_expiry{instance=~".*{{ .Values.exposure.host }}.*"} - time()) / 86400 < {{ $t.certExpiryDays }}
+          for: 1h
+          labels:
+            severity: warning
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "TLS certificate for {{ .Values.exposure.host }} expires in less than {{ $t.certExpiryDays }} days"
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#certificate-expiry
+    {{- if .Values.istio.enabled }}
+
+    - name: {{ $fullname }}.egress
+      rules:
+        - alert: WebappPartnerApiErrors
+          expr: |
+            sum(rate(istio_requests_total{reporter="source", source_workload_namespace="{{ $ns }}", destination_service_name="{{ .Values.istio.partner.host }}", response_code=~"5..|0"}[5m]))
+              / sum(rate(istio_requests_total{reporter="source", source_workload_namespace="{{ $ns }}", destination_service_name="{{ .Values.istio.partner.host }}"}[5m]))
+              * 100 > {{ $t.errorRatePercent }}
+          for: 10m
+          labels:
+            severity: critical
+            environment: {{ $env | quote }}
+          annotations:
+            summary: "Calls to the partner API through the egress gateway are failing"
+            description: "Check the egress gateway logs, the client certificate secret and the corporate proxy."
+            runbook_url: https://github.com/GhislainAdon/openshift-helm-platform-blueprint/blob/main/docs/runbook.md#partner-api-errors
+    {{- end }}
+{{- end }}

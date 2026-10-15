@@ -1,0 +1,16 @@
+{{- if .Values.monitoring.grafanaDashboard.enabled }}
+# Picked up by the Grafana dashboard sidecar (label below) or by the Grafana
+# Operator via a GrafanaDashboard CR pointing at this ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp.fullname" . }}-dashboard
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  webapp-overview.json: |-
+    {{- .Files.Get "dashboards/webapp-overview.json" | nindent 4 }}
+{{- end }}

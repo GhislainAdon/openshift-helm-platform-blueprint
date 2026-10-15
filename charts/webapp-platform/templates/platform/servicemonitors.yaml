@@ -1,0 +1,46 @@
+{{- /*
+One ServiceMonitor per component exposing metrics:
+  frontend   -> nginx-prometheus-exporter sidecar (port "metrics")
+  authProxy  -> apache_exporter sidecar           (port "metrics")
+  backend    -> application /metrics (prom-client, port "http")
+  mongodb    -> percona mongodb_exporter sidecar  (port "metrics")
+*/}}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- $sm := .Values.monitoring.serviceMonitor }}
+{{- $targets := list
+      (dict "component" "frontend"  "port" "metrics" "path" "/metrics")
+      (dict "component" "authProxy" "port" "metrics" "path" "/metrics")
+      (dict "component" "backend"   "port" "http"    "path" (.Values.backend.metrics.path | default "/metrics"))
+      (dict "component" "mongodb"   "port" "metrics" "path" "/metrics") }}
+{{- range $t := $targets }}
+{{- $v := index $.Values $t.component }}
+{{- if and $v.enabled $v.metrics.enabled }}
+{{- $ctx := dict "root" $ "component" $t.component }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "webapp.componentName" $ctx }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "webapp.componentSelectorLabels" $ctx | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+  endpoints:
+    - port: {{ $t.port }}
+      path: {{ $t.path }}
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      relabelings:
+        - targetLabel: environment
+          replacement: {{ $.Values.global.environment | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
