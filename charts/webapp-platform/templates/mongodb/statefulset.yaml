@@ -1,0 +1,153 @@
+{{- if .Values.mongodb.enabled }}
+{{- $ctx := dict "root" $ "component" "mongodb" }}
+{{- $m := .Values.mongodb }}
+{{- $name := include "webapp.componentName" $ctx }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  # Single member on purpose: MongoDB is NOT scaled by an HPA (a replica set
+  # needs an operator or an explicit rs.initiate - see docs/lessons-learned.md).
+  replicas: 1
+  serviceName: {{ $name }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "webapp.componentSelectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "webapp.componentLabels" $ctx | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: mongodb
+    spec:
+      serviceAccountName: {{ include "webapp.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with (include "webapp.imagePullSecrets" . | trim) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml (merge (deepCopy ($m.podSecurityContext | default dict)) .Values.podSecurityContext) | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: mongodb
+          image: {{ include "webapp.image" (dict "root" $ "image" $m.image) | quote }}
+          imagePullPolicy: {{ $m.image.pullPolicy }}
+          args:
+            - --bind_ip_all
+            - --auth
+            - --wiredTigerCacheSizeGB
+            - {{ $m.wiredTigerCacheSizeGB | quote }}
+          env:
+            # The root user is created by the image entrypoint on first start only.
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.auth.secretName }}
+                  key: root-username
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.auth.secretName }}
+                  key: root-password
+          ports:
+            - name: mongodb
+              containerPort: {{ $m.port }}
+              protocol: TCP
+          {{- with (include "webapp.probe" (dict "name" "startupProbe" "probe" $m.probes.startup) | trim) }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          {{- with (include "webapp.probe" (dict "name" "readinessProbe" "probe" $m.probes.readiness) | trim) }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          {{- with (include "webapp.probe" (dict "name" "livenessProbe" "probe" $m.probes.liveness) | trim) }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: configdb
+              mountPath: /data/configdb
+            - name: tmp
+              mountPath: /tmp
+        {{- if $m.metrics.enabled }}
+        - name: mongodb-exporter
+          image: {{ include "webapp.image" (dict "root" $ "image" $m.metrics.image) | quote }}
+          imagePullPolicy: {{ $m.metrics.image.pullPolicy }}
+          env:
+            - name: MONGODB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.auth.secretName }}
+                  key: metrics-username
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.auth.secretName }}
+                  key: metrics-password
+          args:
+            - --mongodb.uri=mongodb://127.0.0.1:{{ $m.port }}/admin
+            - --web.listen-address=:{{ $m.metrics.port }}
+            - --compatible-mode
+            - --collect-all
+          ports:
+            - name: metrics
+              containerPort: {{ $m.metrics.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml $m.metrics.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: configdb
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- include "webapp.tmpVolume" . | nindent 8 }}
+        {{- if not $m.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+      {{- with $m.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $m.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if $m.persistence.enabled }}
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data
+        labels:
+          {{- include "webapp.componentSelectorLabels" $ctx | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml $m.persistence.accessModes | nindent 10 }}
+        {{- with $m.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $m.persistence.size }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  {{- end }}
+{{- end }}

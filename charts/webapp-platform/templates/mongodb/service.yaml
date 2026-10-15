@@ -1,0 +1,25 @@
+{{- if .Values.mongodb.enabled }}
+{{- $ctx := dict "root" $ "component" "mongodb" }}
+# Headless service: stable DNS for the StatefulSet member(s).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "webapp.componentName" $ctx }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "webapp.componentSelectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: mongodb
+      port: {{ .Values.mongodb.port }}
+      targetPort: mongodb
+      protocol: TCP
+    {{- if .Values.mongodb.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.mongodb.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
+{{- end }}

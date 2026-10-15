@@ -1,0 +1,132 @@
+{{- if and .Values.mongodb.enabled .Values.mongodb.bootstrap.enabled }}
+{{- $ctx := dict "root" $ "component" "mongodb" }}
+{{- $m := .Values.mongodb }}
+{{- $name := include "webapp.componentName" $ctx }}
+# -----------------------------------------------------------------------------
+# Idempotent user bootstrap.
+# Replaces the "bare Pod" approach (immutable on upgrade, never retried, leaves
+# Completed pods behind) with a Helm hook Job: re-runnable, retried with
+# backoff, garbage-collected after success. createUser/updateUser upsert means
+# running it N times converges to the same state (and rotates passwords).
+# Argo CD maps post-install/post-upgrade hooks to PostSync.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-bootstrap
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  bootstrap.js: |
+    // Credentials are read from the environment, never from argv.
+    const admin = db.getSiblingDB("admin");
+    admin.auth(process.env.ROOT_USERNAME, process.env.ROOT_PASSWORD);
+
+    // Build the user document without inlining credential literals.
+    function withPassword(fields, password) {
+      const out = Object.assign({}, fields);
+      out["pwd"] = password;
+      return out;
+    }
+
+    function upsertUser(dbName, name, password, roles) {
+      if (!name || !password) {
+        print("skip: missing credentials for a user on " + dbName);
+        return;
+      }
+      const target = db.getSiblingDB(dbName);
+      if (target.getUser(name)) {
+        target.updateUser(name, withPassword({ roles }, password));
+        print("updated user " + name + " on " + dbName);
+      } else {
+        const doc = withPassword({ roles }, password);
+        doc["user"] = name;
+        target.createUser(doc);
+        print("created user " + name + " on " + dbName);
+      }
+    }
+
+    const appDb = process.env.APP_DATABASE;
+    upsertUser(appDb, process.env.APP_USERNAME, process.env.APP_PASSWORD,
+      [{ role: "readWrite", db: appDb }]);
+    upsertUser("admin", process.env.METRICS_USERNAME, process.env.METRICS_PASSWORD,
+      [{ role: "clusterMonitor", db: "admin" }, { role: "read", db: "local" }]);
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-bootstrap
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $m.bootstrap.backoffLimit }}
+  activeDeadlineSeconds: {{ $m.bootstrap.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $m.bootstrap.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "webapp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mongodb-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "webapp.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with (include "webapp.imagePullSecrets" . | trim) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml (merge (deepCopy ($m.podSecurityContext | default dict)) .Values.podSecurityContext) | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "webapp.image" (dict "root" $ "image" $m.image) | quote }}
+          imagePullPolicy: {{ $m.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              uri="mongodb://${MONGO_HOST}:${MONGO_PORT}/admin"
+              echo "waiting for ${MONGO_HOST}:${MONGO_PORT}"
+              until mongosh --quiet "$uri" --eval "db.adminCommand('ping').ok" >/dev/null 2>&1; do
+                sleep 5
+              done
+              mongosh --quiet "$uri" --file /scripts/bootstrap.js
+          env:
+            - name: MONGO_HOST
+              value: {{ $name }}
+            - name: MONGO_PORT
+              value: {{ $m.port | quote }}
+            - name: APP_DATABASE
+              value: {{ $m.database | quote }}
+            - name: HOME
+              value: /tmp
+            {{- range $env, $key := dict "ROOT_USERNAME" "root-username" "ROOT_PASSWORD" "root-password" "APP_USERNAME" "app-username" "APP_PASSWORD" "app-password" "METRICS_USERNAME" "metrics-username" "METRICS_PASSWORD" "metrics-password" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $m.auth.secretName }}
+                  key: {{ $key }}
+            {{- end }}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 256Mi}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ $name }}-bootstrap
+        {{- include "webapp.tmpVolume" . | nindent 8 }}
+{{- end }}
