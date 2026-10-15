@@ -1,0 +1,8 @@
+# KSV-0125 "Restrict container images to trusted registries":
+# every image is pulled from the internal Harbor registry (harbor.example.org,
+# including its "mirror/" proxy-cache projects). Trivy's built-in allow-list
+# cannot know a private registry; the restriction is enforced in-cluster by an
+# admission policy (allowed registries) instead.
+AVD-KSV-0125
+KSV-0125
+KSV125

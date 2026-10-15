@@ -1,0 +1,34 @@
+# Helm build output
+charts/*/charts/
+charts/*/Chart.lock
+*.tgz
+dist/
+rendered/
+
+# Scanner caches / reports
+.trivycache/
+trivy-*.json
+trivy-*.sarif
+
+# Secrets and key material - never commit
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cert
+*.jks
+secrets*.yaml
+*.secret.yaml
+*.dec.yaml
+.env
+.env.*
+kubeconfig*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
