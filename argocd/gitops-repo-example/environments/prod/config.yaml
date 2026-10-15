@@ -1,0 +1,7 @@
+# Read by the ApplicationSet git files generator.
+# Bumped only through a reviewed merge request (promote/prod-* branches).
+env: prod
+cluster: https://api.prod.example.org:6443
+namespace: webapp-prod
+chartVersion: 1.0.0
+autoSync: false

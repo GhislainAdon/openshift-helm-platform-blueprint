@@ -1,0 +1,77 @@
+# -----------------------------------------------------------------------------
+# One Argo CD Application per environment.
+#
+# - Chart comes from the OCI registry (immutable, scanned, versioned artefact).
+# - Environment parameters (cluster, namespace, chartVersion, autoSync) and
+#   values come from the GitOps repository: promoting = changing chartVersion
+#   in Git, reviewed by merge request.
+# - dev / qualif auto-sync with self-heal; preprod / prod are manual sync.
+# -----------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: webapp-platform
+  namespace: openshift-gitops
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    # One config.yaml per environment in the GitOps repository, e.g.
+    # environments/prod/config.yaml (see argocd/gitops-repo-example/).
+    # CI bumps chartVersion there; Argo CD picks it up.
+    - git:
+        repoURL: https://gitlab.example.org/platform/webapp-gitops.git
+        revision: main
+        files:
+          - path: "environments/*/config.yaml"
+  template:
+    metadata:
+      name: "webapp-{{ .env }}"
+      labels:
+        app.kubernetes.io/part-of: webapp-platform
+        app.example.org/environment: "{{ .env }}"
+      annotations:
+        notifications.argoproj.io/subscribe.on-sync-failed.webhook: platform-alerts
+        notifications.argoproj.io/subscribe.on-health-degraded.webhook: platform-alerts
+    spec:
+      project: webapp
+      sources:
+        - repoURL: harbor.example.org/webapp-charts
+          chart: webapp-platform
+          targetRevision: "{{ .chartVersion }}"
+          helm:
+            releaseName: webapp
+            valueFiles:
+              - "$values/environments/{{ .env }}/values.yaml"
+        - repoURL: https://gitlab.example.org/platform/webapp-gitops.git
+          targetRevision: main
+          ref: values
+      destination:
+        server: "{{ .cluster }}"
+        namespace: "{{ .namespace }}"
+      ignoreDifferences:
+        # Replica count is owned by the HPA when scalability is enabled.
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=false
+          - ServerSideApply=true
+          - RespectIgnoreDifferences=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 10s
+            factor: 2
+            maxDuration: 3m
+  templatePatch: |
+    {{- if .autoSync }}
+    spec:
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+    {{- end }}

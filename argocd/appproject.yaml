@@ -1,0 +1,54 @@
+# Least-privilege Argo CD project for the application: restricted sources,
+# destinations and resource kinds (no cluster-scoped objects).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: webapp
+  namespace: openshift-gitops
+spec:
+  description: webapp-platform environments
+  sourceRepos:
+    - harbor.example.org/webapp-charts
+    - https://gitlab.example.org/platform/webapp-gitops.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: webapp-dev
+    - server: https://kubernetes.default.svc
+      namespace: webapp-qualif
+    - server: https://api.preprod.example.org:6443
+      namespace: webapp-preprod
+    - server: https://api.prod.example.org:6443
+      namespace: webapp-prod
+    # EnvoyFilter for the egress gateway lives in the mesh namespace.
+    - server: "*"
+      namespace: istio-system
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - {group: "", kind: ConfigMap}
+    - {group: "", kind: Service}
+    - {group: "", kind: ServiceAccount}
+    - {group: apps, kind: Deployment}
+    - {group: apps, kind: StatefulSet}
+    - {group: batch, kind: Job}
+    - {group: autoscaling, kind: HorizontalPodAutoscaler}
+    - {group: autoscaling.k8s.io, kind: VerticalPodAutoscaler}
+    - {group: policy, kind: PodDisruptionBudget}
+    - {group: networking.k8s.io, kind: NetworkPolicy}
+    - {group: networking.k8s.io, kind: Ingress}
+    - {group: route.openshift.io, kind: Route}
+    - {group: monitoring.coreos.com, kind: ServiceMonitor}
+    - {group: monitoring.coreos.com, kind: PrometheusRule}
+    - {group: external-secrets.io, kind: ExternalSecret}
+    - {group: secrets.hashicorp.com, kind: VaultStaticSecret}
+    - {group: networking.istio.io, kind: Sidecar}
+    - {group: networking.istio.io, kind: ServiceEntry}
+    - {group: networking.istio.io, kind: Gateway}
+    - {group: networking.istio.io, kind: VirtualService}
+    - {group: networking.istio.io, kind: DestinationRule}
+    - {group: networking.istio.io, kind: EnvoyFilter}
+  roles:
+    - name: deployer
+      description: CI may sync dev/qualif only
+      policies:
+        - p, proj:webapp:deployer, applications, sync, webapp/webapp-dev, allow
+        - p, proj:webapp:deployer, applications, sync, webapp/webapp-qualif, allow

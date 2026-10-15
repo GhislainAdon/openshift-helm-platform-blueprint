@@ -1,0 +1,6 @@
+# Environment overlay consumed via $values/environments/dev/values.yaml.
+# Typically a copy of charts/webapp-platform/values-dev.yaml kept in the GitOps repo.
+global:
+  environment: dev
+exposure:
+  host: app-dev.example.org

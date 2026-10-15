@@ -1,0 +1,10 @@
+# Environment overlay consumed via $values/environments/prod/values.yaml.
+# Typically a copy of charts/webapp-platform/values-prod.yaml kept in the GitOps repo.
+global:
+  environment: prod
+exposure:
+  host: app.example.org
+scalability:
+  enabled: true
+istio:
+  enabled: true

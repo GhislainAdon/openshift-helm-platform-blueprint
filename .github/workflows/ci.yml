@@ -1,0 +1,172 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CHART_DIR: charts/webapp-platform
+  KUBERNETES_VERSION: "1.29.0"
+  HELM_VERSION: v3.16.4
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # helm lint + helm template | kubeconform, once per environment
+  # ---------------------------------------------------------------------------
+  validate:
+    name: validate (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, qualif, preprod, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: helm lint "$CHART_DIR" -f "$CHART_DIR/values-${{ matrix.env }}.yaml" --strict
+
+      - name: helm template
+        run: |
+          mkdir -p rendered
+          helm template webapp "$CHART_DIR" \
+            -f "$CHART_DIR/values-${{ matrix.env }}.yaml" \
+            --namespace "webapp-${{ matrix.env }}" \
+            > "rendered/${{ matrix.env }}.yaml"
+          grep -c '^kind:' "rendered/${{ matrix.env }}.yaml"
+
+      - name: kubeconform
+        run: |
+          docker run --rm -v "$PWD/rendered:/w" ghcr.io/yannh/kubeconform:latest \
+            -strict -summary -output text \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            "/w/${{ matrix.env }}.yaml"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-${{ matrix.env }}
+          path: rendered/${{ matrix.env }}.yaml
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Guard rails must actually fire
+  # ---------------------------------------------------------------------------
+  negative-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: NODE_TLS_REJECT_UNAUTHORIZED=0 is rejected
+        run: |
+          if helm template t "$CHART_DIR" \
+               --set 'backend.env[0].name=NODE_TLS_REJECT_UNAUTHORIZED' \
+               --set-string 'backend.env[0].value=0' >/dev/null 2>&1; then
+            echo "expected render failure"; exit 1
+          fi
+      - name: Istio disabled renders no Istio object
+        run: |
+          out=$(helm template t "$CHART_DIR" --set istio.enabled=false)
+          if echo "$out" | grep -E '^apiVersion: networking.istio.io'; then
+            echo "Istio objects rendered while istio.enabled=false"; exit 1
+          fi
+      - name: Scalability disabled renders no HPA and keeps replicas
+        run: |
+          out=$(helm template t "$CHART_DIR" --set scalability.enabled=false)
+          ! echo "$out" | grep -q 'kind: HorizontalPodAutoscaler'
+          echo "$out" | grep -q 'replicas: 1'
+      - name: HPA never targets the MongoDB StatefulSet
+        run: |
+          out=$(helm template t "$CHART_DIR" -f "$CHART_DIR/values-prod.yaml")
+          echo "$out" | awk '/kind: HorizontalPodAutoscaler/,/maxReplicas/' | grep -A2 scaleTargetRef | grep -q 'kind: Deployment'
+          ! echo "$out" | awk '/kind: HorizontalPodAutoscaler/,/maxReplicas/' | grep -q 'kind: StatefulSet'
+
+  # ---------------------------------------------------------------------------
+  # Misconfiguration scan (chart + rendered manifests)
+  # ---------------------------------------------------------------------------
+  trivy:
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rendered-*
+          path: rendered
+          merge-multiple: true
+      - name: trivy config (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          trivyignores: .trivyignore
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - name: trivy config (SARIF report, all severities)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          trivyignores: .trivyignore
+          format: sarif
+          output: trivy-config.sarif
+          exit-code: "0"
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && github.event_name != 'pull_request'
+        with:
+          sarif_file: trivy-config.sarif
+
+  # ---------------------------------------------------------------------------
+  # Secret scanning
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source /repo --redact -v
+
+  # ---------------------------------------------------------------------------
+  # Optional: chart-testing lint (schema of Chart.yaml, maintainers, version)
+  # ---------------------------------------------------------------------------
+  chart-testing:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: helm/chart-testing-action@v2.7.0
+      - name: ct lint
+        run: ct lint --config ct.yaml --all

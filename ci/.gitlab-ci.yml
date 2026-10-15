@@ -1,0 +1,201 @@
+# -----------------------------------------------------------------------------
+# Reference GitLab CI pipeline for the webapp-platform chart (example only -
+# the pipeline that actually runs on this public repository is
+# .github/workflows/ci.yml).
+#
+#   lint -> validate (helm template | kubeconform) -> security (trivy config)
+#        -> package -> publish (OCI push to Harbor) -> gitops (bump tag)
+#
+# Required CI/CD variables (masked + protected, provided by the platform):
+#   HARBOR_USER / HARBOR_PASSWORD   robot account with push rights on the chart project
+#   GITOPS_TOKEN                    project access token with write_repository on the GitOps repo
+# -----------------------------------------------------------------------------
+
+stages:
+  - lint
+  - validate
+  - security
+  - package
+  - publish
+  - gitops
+
+variables:
+  CHART_DIR: charts/webapp-platform
+  CHART_NAME: webapp-platform
+  HELM_IMAGE: harbor.example.org/mirror/alpine/helm:3.16.4
+  KUBECONFORM_IMAGE: harbor.example.org/mirror/yannh/kubeconform:v0.6.7-alpine
+  TRIVY_IMAGE: harbor.example.org/mirror/aquasec/trivy:0.58.1
+  OCI_REGISTRY: harbor.example.org
+  OCI_PROJECT: webapp-charts
+  GITOPS_REPO: gitlab.example.org/platform/webapp-gitops.git
+  KUBERNETES_VERSION: "1.29.0"
+
+default:
+  interruptible: true
+
+.envs: &envs
+  parallel:
+    matrix:
+      - ENV: [dev, qualif, preprod, prod]
+
+# ---------------------------------------------------------------- lint -------
+helm-lint:
+  stage: lint
+  image:
+    name: $HELM_IMAGE
+    entrypoint: [""]
+  <<: *envs
+  script:
+    - helm lint "$CHART_DIR" -f "$CHART_DIR/values-${ENV}.yaml" --strict
+
+# ------------------------------------------------------------ validate -------
+render:
+  stage: validate
+  image:
+    name: $HELM_IMAGE
+    entrypoint: [""]
+  <<: *envs
+  script:
+    - mkdir -p rendered
+    - helm template webapp "$CHART_DIR" -f "$CHART_DIR/values-${ENV}.yaml" -n "webapp-${ENV}" > "rendered/${ENV}.yaml"
+  artifacts:
+    paths: [rendered/]
+    expire_in: 1 week
+
+kubeconform:
+  stage: validate
+  needs: [render]
+  image:
+    name: $KUBECONFORM_IMAGE
+    entrypoint: [""]
+  script:
+    - >
+      /kubeconform -strict -summary
+      -kubernetes-version "$KUBERNETES_VERSION"
+      -ignore-missing-schemas
+      -schema-location default
+      -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+      rendered/
+
+# ------------------------------------------------------------ security -------
+trivy-config:
+  stage: security
+  needs: [render]
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_CACHE_DIR: .trivycache/
+  script:
+    # Gate on HIGH/CRITICAL, publish everything as a GitLab code-quality-like report.
+    - trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 .
+    - trivy config --ignorefile .trivyignore --format json --output trivy-config.json .
+  cache:
+    paths: [.trivycache/]
+  artifacts:
+    when: always
+    paths: [trivy-config.json]
+
+# ------------------------------------------------------------- package -------
+package:
+  stage: package
+  image:
+    name: $HELM_IMAGE
+    entrypoint: [""]
+  script:
+    - VERSION=$(grep '^version:' "$CHART_DIR/Chart.yaml" | awk '{print $2}')
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        VERSION="${CI_COMMIT_TAG#v}"
+      else
+        VERSION="${VERSION}-${CI_PIPELINE_IID}.${CI_COMMIT_SHORT_SHA}"
+      fi
+    - helm package "$CHART_DIR" --version "$VERSION" --app-version "$VERSION" -d dist/
+    - echo "CHART_VERSION=$VERSION" > chart.env
+  artifacts:
+    paths: [dist/]
+    reports:
+      dotenv: chart.env
+
+# ------------------------------------------------------------- publish -------
+publish-oci:
+  stage: publish
+  needs: [package]
+  image:
+    name: $HELM_IMAGE
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "$HARBOR_PASSWORD" | helm registry login "$OCI_REGISTRY" -u "$HARBOR_USER" --password-stdin
+    - helm push "dist/${CHART_NAME}-${CHART_VERSION}.tgz" "oci://${OCI_REGISTRY}/${OCI_PROJECT}"
+
+# --------------------------------------------------------------- gitops ------
+# Bump the chart version in the GitOps repository; Argo CD does the rest.
+# dev / qualif follow every main build; preprod / prod only follow tags and
+# are promoted through a merge request (no direct push to protected branches).
+.bump-gitops:
+  stage: gitops
+  needs: [package, publish-oci]
+  image: harbor.example.org/mirror/alpine/git:2.45.2
+  before_script:
+    - apk add --no-cache yq
+    - git config --global user.name "ci-bot"
+    - git config --global user.email "ci-bot@example.org"
+    - git clone "https://ci-bot:${GITOPS_TOKEN}@${GITOPS_REPO}" gitops
+  script:
+    - cd gitops
+    - yq -i ".chartVersion = \"${CHART_VERSION}\"" "environments/${TARGET_ENV}/config.yaml"
+    - git add "environments/${TARGET_ENV}/config.yaml"
+    - git commit -m "chore(${TARGET_ENV}): webapp-platform ${CHART_VERSION}" || echo "nothing to commit"
+    - git push origin "${PUSH_REF}"
+
+gitops-dev:
+  extends: .bump-gitops
+  variables: {TARGET_ENV: dev, PUSH_REF: "HEAD:main"}
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+gitops-qualif:
+  extends: .bump-gitops
+  variables: {TARGET_ENV: qualif, PUSH_REF: "HEAD:main"}
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+gitops-promote-prod:
+  extends: .bump-gitops
+  variables: {TARGET_ENV: prod, PUSH_REF: "HEAD:refs/heads/promote/prod-${CI_COMMIT_TAG}"}
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+  after_script:
+    - echo "Open a merge request from promote/prod-${CI_COMMIT_TAG} - prod requires review + manual Argo CD sync."
+
+# -----------------------------------------------------------------------------
+# Reference: application image build with Kaniko (lives in the app repos).
+# --registry-mirror avoids Docker Hub anonymous pull limits (TOOMANYREQUESTS):
+# see docs/case-study-kaniko-rate-limit.md
+# -----------------------------------------------------------------------------
+.kaniko-build:
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {"auths":{"${OCI_REGISTRY}":{"auth":"$(printf '%s:%s' "$HARBOR_USER" "$HARBOR_PASSWORD" | base64 | tr -d '\n')"}}}
+      EOF
+    - >
+      /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --destination "${OCI_REGISTRY}/webapp/${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA}"
+      --registry-mirror "${OCI_REGISTRY}/mirror"
+      --cache=true
+      --cache-repo "${OCI_REGISTRY}/webapp/cache"
+      --snapshot-mode=redo
+      --use-new-run

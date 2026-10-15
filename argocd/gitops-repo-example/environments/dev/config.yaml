@@ -1,0 +1,6 @@
+# Read by the ApplicationSet git files generator.
+env: dev
+cluster: https://kubernetes.default.svc
+namespace: webapp-dev
+chartVersion: 1.0.0-42.ab12cd3
+autoSync: true
