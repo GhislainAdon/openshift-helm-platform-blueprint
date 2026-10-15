@@ -1,0 +1,42 @@
+{{- define "webapp.backend.env" -}}
+- name: PORT
+  value: {{ .Values.backend.containerPort | quote }}
+- name: PARTNER_API_URL
+  value: {{ include "webapp.partnerApiUrl" . | quote }}
+{{- if .Values.mongodb.enabled }}
+- name: MONGODB_HOST
+  value: {{ include "webapp.componentName" (dict "root" . "component" "mongodb") }}
+- name: MONGODB_PORT
+  value: {{ .Values.mongodb.port | quote }}
+- name: MONGODB_DATABASE
+  value: {{ .Values.mongodb.database | quote }}
+- name: MONGODB_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.mongodb.auth.secretName }}
+      key: app-username
+- name: MONGODB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.mongodb.auth.secretName }}
+      key: app-password
+{{- end }}
+{{- end }}
+{{- if .Values.backend.enabled }}
+{{- $podLabels := dict }}
+{{- $podAnnotations := dict }}
+{{- if .Values.istio.enabled }}
+{{- /* Only the backend joins the mesh: it is the only workload calling out. */}}
+{{- $podLabels = dict "sidecar.istio.io/inject" "true" }}
+{{- $podAnnotations = dict "proxy.istio.io/config" "{\"holdApplicationUntilProxyStarts\": true}" }}
+{{- end }}
+{{- include "webapp.deployment" (dict
+    "root" $
+    "component" "backend"
+    "env" (include "webapp.backend.env" .)
+    "volumeMounts" "- name: tmp\n  mountPath: /tmp"
+    "volumes" (include "webapp.tmpVolume" .)
+    "extraPodLabels" $podLabels
+    "extraPodAnnotations" $podAnnotations
+) }}
+{{- end }}

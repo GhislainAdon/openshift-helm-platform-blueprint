@@ -1,0 +1,54 @@
+{{- define "webapp.authProxy.volumeMounts" -}}
+- name: httpd-config
+  mountPath: /etc/httpd/conf.d/webapp.conf
+  subPath: webapp.conf
+  readOnly: true
+- name: saml
+  mountPath: /etc/saml
+  readOnly: true
+- name: tmp
+  mountPath: /tmp
+- name: run
+  mountPath: /run/httpd
+{{- end }}
+{{- define "webapp.authProxy.volumes" -}}
+- name: httpd-config
+  configMap:
+    name: {{ include "webapp.componentName" (dict "root" . "component" "authProxy") }}-httpd
+- name: saml
+  secret:
+    secretName: {{ required "authProxy.saml.secretName is required" .Values.authProxy.saml.secretName }}
+    defaultMode: 0440
+{{ include "webapp.tmpVolume" . }}
+- name: run
+  emptyDir:
+    sizeLimit: 16Mi
+{{- end }}
+{{- define "webapp.authProxy.exporter" -}}
+{{- $m := .Values.authProxy.metrics }}
+- name: apache-exporter
+  image: {{ include "webapp.image" (dict "root" . "image" $m.image) | quote }}
+  imagePullPolicy: {{ $m.image.pullPolicy }}
+  args:
+    - --scrape_uri=http://127.0.0.1:8081/server-status?auto
+    - --telemetry.address=:{{ $m.port }}
+  ports:
+    - name: metrics
+      containerPort: {{ $m.port }}
+      protocol: TCP
+  resources:
+    {{- toYaml $m.resources | nindent 4 }}
+  securityContext:
+    {{- toYaml .Values.containerSecurityContext | nindent 4 }}
+{{- end }}
+{{- if .Values.authProxy.enabled }}
+{{- include "webapp.deployment" (dict
+    "root" $
+    "component" "authProxy"
+    "checksum" (include (print $.Template.BasePath "/auth-proxy/configmap.yaml") . | sha256sum)
+    "ports" "- name: health\n  containerPort: 8081\n  protocol: TCP"
+    "volumeMounts" (include "webapp.authProxy.volumeMounts" .)
+    "volumes" (include "webapp.authProxy.volumes" .)
+    "extraContainers" (ternary (include "webapp.authProxy.exporter" .) "" .Values.authProxy.metrics.enabled)
+) }}
+{{- end }}

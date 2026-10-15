@@ -1,0 +1,78 @@
+{{- if .Values.authProxy.enabled }}
+{{- $ctx := dict "root" $ "component" "authProxy" }}
+{{- $ap := .Values.authProxy }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp.componentName" $ctx }}-httpd
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+data:
+  # Included by the image's main httpd.conf (IncludeOptional conf.d/*.conf).
+  # The image is expected to ship mod_auth_mellon, mod_proxy_http,
+  # mod_headers and mod_status, and to run as an arbitrary non-root UID.
+  webapp.conf: |
+    Listen {{ $ap.containerPort }}
+    Listen 8081
+
+    ServerTokens Prod
+    ServerSignature Off
+    TraceEnable Off
+
+    # ---------------------------------------------------------------------
+    # Public vhost: SAML 2.0 Service Provider in front of the frontend.
+    # TLS is terminated by the Route/Ingress; Apache must still build https
+    # URLs for SAML endpoints, hence UseCanonicalName + explicit scheme.
+    # ---------------------------------------------------------------------
+    <VirtualHost *:{{ $ap.containerPort }}>
+      ServerName https://{{ .Values.exposure.host }}:443
+      UseCanonicalName On
+
+      ErrorLog /dev/stderr
+      CustomLog /dev/stdout combined
+
+      RequestHeader unset X-Remote-User early
+
+      <Location />
+        MellonEnable "auth"
+        MellonSPentityId "{{ $ap.saml.spEntityId }}"
+        MellonEndpointPath "{{ $ap.saml.endpointPath }}"
+        MellonSPPrivateKeyFile /etc/saml/sp.key
+        MellonSPCertFile /etc/saml/sp.crt
+        MellonIdPMetadataFile /etc/saml/idp-metadata.xml
+        MellonSecureCookie On
+        MellonCookieSameSite lax
+        MellonSessionLength 28800
+        AuthType Mellon
+        Require valid-user
+        RequestHeader set X-Remote-User "%{MELLON_NAME_ID}e" env=MELLON_NAME_ID
+      </Location>
+
+      {{- range $ap.saml.publicPaths }}
+      <Location "{{ . }}">
+        MellonEnable "off"
+        Require all granted
+      </Location>
+      {{- end }}
+
+      ProxyPreserveHost On
+      ProxyRequests Off
+      ProxyPass {{ $ap.saml.endpointPath }} !
+      ProxyPass / {{ include "webapp.frontendUrl" . }}/ timeout=60 keepalive=On
+      ProxyPassReverse / {{ include "webapp.frontendUrl" . }}/
+    </VirtualHost>
+
+    # ---------------------------------------------------------------------
+    # Internal vhost (not exposed by the Service): health + mod_status.
+    # ---------------------------------------------------------------------
+    <VirtualHost *:8081>
+      <Location /server-health>
+        SetHandler server-status
+        Require all granted
+      </Location>
+      <Location /server-status>
+        SetHandler server-status
+        Require local
+      </Location>
+    </VirtualHost>
+{{- end }}

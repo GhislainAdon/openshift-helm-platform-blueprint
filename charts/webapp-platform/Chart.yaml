@@ -1,0 +1,26 @@
+apiVersion: v2
+name: webapp-platform
+description: >-
+  Production-grade Helm chart for a 3-tier web application (nginx frontend,
+  SAML auth proxy, Node.js backend, MongoDB) on OpenShift / Kubernetes, with
+  GitOps-friendly defaults, autoscaling, observability, network isolation and
+  an Istio egress pattern (mTLS origination + HTTP CONNECT through a corporate proxy).
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - openshift
+  - gitops
+  - argocd
+  - istio
+  - egress
+  - mongodb
+  - hpa
+home: https://github.com/GhislainAdon/openshift-helm-platform-blueprint
+sources:
+  - https://github.com/GhislainAdon/openshift-helm-platform-blueprint
+maintainers:
+  - name: GhislainAdon
+    url: https://github.com/GhislainAdon
+annotations:
+  category: Infrastructure

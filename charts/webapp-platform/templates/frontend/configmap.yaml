@@ -1,0 +1,121 @@
+{{- if .Values.frontend.enabled }}
+{{- $ctx := dict "root" $ "component" "frontend" }}
+{{- $fe := .Values.frontend }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "webapp.componentName" $ctx }}-nginx
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+
+      # Writable paths only under /tmp (read-only root filesystem).
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      log_format json escape=json '{"time":"$time_iso8601","remote":"$remote_addr",'
+                                  '"method":"$request_method","uri":"$uri","status":$status,'
+                                  '"bytes":$body_bytes_sent,"rt":$request_time,'
+                                  '"upstream_rt":"$upstream_response_time","request_id":"$request_id"}';
+      access_log /dev/stdout json;
+
+      sendfile on;
+      tcp_nopush on;
+      keepalive_timeout 65;
+      server_tokens off;
+      client_max_body_size {{ $fe.clientMaxBodySize }};
+
+      gzip on;
+      gzip_types text/plain text/css application/json application/javascript image/svg+xml;
+
+      # CORS allow-list: only exact origins listed in values are echoed back.
+      map $http_origin $cors_origin {
+        default "";
+        {{- if $fe.cors.enabled }}
+        {{- range $fe.cors.allowedOrigins }}
+        {{ . | quote }} $http_origin;
+        {{- end }}
+        {{- end }}
+      }
+
+      upstream backend {
+        server {{ include "webapp.componentName" (dict "root" $ "component" "backend") }}:{{ .Values.backend.service.port }};
+        keepalive 32;
+      }
+
+      server {
+        listen {{ $fe.containerPort }};
+        server_name _;
+        root /usr/share/nginx/html;
+
+        include /etc/nginx/webapp/security-headers.conf;
+
+        location = /healthz {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        location /api/ {
+          include /etc/nginx/webapp/security-headers.conf;
+          {{- if $fe.cors.enabled }}
+          add_header Access-Control-Allow-Origin $cors_origin always;
+          add_header Access-Control-Allow-Credentials "true" always;
+          add_header Vary Origin always;
+
+          if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin $cors_origin always;
+            add_header Access-Control-Allow-Methods {{ $fe.cors.allowedMethods | quote }} always;
+            add_header Access-Control-Allow-Headers {{ $fe.cors.allowedHeaders | quote }} always;
+            add_header Access-Control-Max-Age {{ $fe.cors.maxAge }} always;
+            add_header Vary Origin always;
+            return 204;
+          }
+          {{- end }}
+
+          proxy_pass http://backend;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Request-ID $request_id;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_read_timeout 60s;
+        }
+
+        location / {
+          try_files $uri $uri/ /index.html;
+        }
+      }
+
+      # Local-only status endpoint scraped by the nginx-prometheus-exporter sidecar.
+      server {
+        listen 127.0.0.1:8081;
+        location = /stub_status {
+          stub_status;
+          access_log off;
+        }
+      }
+    }
+
+  security-headers.conf: |
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'none'" always;
+{{- end }}

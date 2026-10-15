@@ -1,0 +1,18 @@
+# Patterns to ignore when building packages.
+.DS_Store
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# Environment overlays are shipped alongside the chart, not inside the package
+values-*.yaml
+# Never package local secrets
+*.key
+*.pem
+*.p12
+secrets*.yaml

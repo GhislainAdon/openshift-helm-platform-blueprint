@@ -1,0 +1,7 @@
+{{- if .Values.frontend.enabled }}
+{{- $ports := "" }}
+{{- if .Values.frontend.metrics.enabled }}
+{{- $ports = printf "- name: metrics\n  port: %v\n  targetPort: metrics\n  protocol: TCP" .Values.frontend.metrics.port }}
+{{- end }}
+{{- include "webapp.service" (dict "root" $ "component" "frontend" "ports" $ports) }}
+{{- end }}

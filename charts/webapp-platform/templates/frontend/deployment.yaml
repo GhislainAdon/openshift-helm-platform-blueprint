@@ -1,0 +1,54 @@
+{{- define "webapp.frontend.volumeMounts" -}}
+- name: nginx-config
+  mountPath: /etc/nginx/nginx.conf
+  subPath: nginx.conf
+  readOnly: true
+- name: nginx-config
+  mountPath: /etc/nginx/webapp
+  readOnly: true
+- name: tmp
+  mountPath: /tmp
+- name: cache
+  mountPath: /var/cache/nginx
+{{- end }}
+{{- define "webapp.frontend.volumes" -}}
+- name: nginx-config
+  configMap:
+    name: {{ include "webapp.componentName" (dict "root" . "component" "frontend") }}-nginx
+{{ include "webapp.tmpVolume" . }}
+- name: cache
+  emptyDir:
+    sizeLimit: 128Mi
+{{- end }}
+{{- define "webapp.frontend.exporter" -}}
+{{- $m := .Values.frontend.metrics }}
+- name: nginx-exporter
+  image: {{ include "webapp.image" (dict "root" . "image" $m.image) | quote }}
+  imagePullPolicy: {{ $m.image.pullPolicy }}
+  args:
+    - --nginx.scrape-uri=http://127.0.0.1:8081/stub_status
+    - --web.listen-address=:{{ $m.port }}
+  ports:
+    - name: metrics
+      containerPort: {{ $m.port }}
+      protocol: TCP
+  readinessProbe:
+    httpGet: {path: /metrics, port: metrics}
+    periodSeconds: 15
+  resources:
+    {{- toYaml $m.resources | nindent 4 }}
+  securityContext:
+    {{- toYaml .Values.containerSecurityContext | nindent 4 }}
+{{- end }}
+{{- if .Values.frontend.enabled }}
+{{- $fe := .Values.frontend }}
+{{- $name := include "webapp.componentName" (dict "root" $ "component" "frontend") }}
+{{- include "webapp.deployment" (dict
+    "root" $
+    "component" "frontend"
+    "checksum" (include (print $.Template.BasePath "/frontend/configmap.yaml") . | sha256sum)
+    "volumeMounts" (include "webapp.frontend.volumeMounts" .)
+    "volumes" (include "webapp.frontend.volumes" .)
+    "extraContainers" (ternary (include "webapp.frontend.exporter" .) "" $fe.metrics.enabled)
+) }}
+{{- end }}

@@ -1,0 +1,29 @@
+{{ include "webapp.fullname" . }} deployed to namespace {{ .Release.Namespace }} (environment: {{ .Values.global.environment }}).
+
+{{- if ne .Values.exposure.type "none" }}
+
+Public URL: https://{{ .Values.exposure.host }}  ({{ .Values.exposure.type }} -> {{ .Values.exposure.targetComponent }})
+{{- end }}
+
+Secrets (provider: {{ .Values.secrets.provider }}):
+{{- if eq .Values.secrets.provider "existingSecret" }}
+  The chart does NOT create credentials. Make sure these Secrets exist before the pods start:
+{{- range .Values.secrets.managed }}
+    - {{ .name }}  (keys: {{ join ", " .keys }})
+{{- end }}
+{{- else }}
+  Secrets are synchronised from the secret backend:
+{{- range .Values.secrets.managed }}
+    - {{ .name }}  <- {{ .remotePath }}
+{{- end }}
+{{- end }}
+
+Autoscaling: {{ ternary "HPA enabled (Deployments are not given a fixed replica count)" "disabled (fixed replicas)" .Values.scalability.enabled }}
+Istio egress: {{ ternary (printf "enabled - backend calls http://%s, the mesh originates mTLS and tunnels through %s:%v" .Values.istio.partner.host .Values.istio.corporateProxy.host .Values.istio.corporateProxy.port) "disabled" .Values.istio.enabled }}
+{{- if .Values.istio.enabled }}
+  Client certificate Secret expected in namespace {{ .Values.istio.egressGateway.namespace }}: {{ .Values.istio.partner.credentialName }} (tls.crt, tls.key, ca.crt)
+{{- end }}
+
+Quick checks:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "webapp.componentName" (dict "root" . "component" "mongodb") }}-bootstrap

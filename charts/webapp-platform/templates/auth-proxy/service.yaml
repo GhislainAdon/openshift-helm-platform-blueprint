@@ -1,0 +1,7 @@
+{{- if .Values.authProxy.enabled }}
+{{- $ports := "" }}
+{{- if .Values.authProxy.metrics.enabled }}
+{{- $ports = printf "- name: metrics\n  port: %v\n  targetPort: metrics\n  protocol: TCP" .Values.authProxy.metrics.port }}
+{{- end }}
+{{- include "webapp.service" (dict "root" $ "component" "authProxy" "ports" $ports) }}
+{{- end }}
