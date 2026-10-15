@@ -1,0 +1,62 @@
+# QUALIF - functional acceptance. First environment with the Istio egress
+# pattern, so partner integration is validated exactly as in production.
+global:
+  environment: qualif
+
+exposure:
+  type: route
+  host: app-qualif.example.org
+
+frontend:
+  replicaCount: 1
+  cors:
+    allowedOrigins:
+      - https://app-qualif.example.org
+
+authProxy:
+  replicaCount: 1
+  saml:
+    spEntityId: https://app-qualif.example.org/mellon/metadata
+
+backend:
+  replicaCount: 2
+  env:
+    - name: NODE_ENV
+      value: production
+    - name: LOG_LEVEL
+      value: info
+
+mongodb:
+  persistence:
+    size: 5Gi
+
+secrets:
+  provider: externalSecret
+  managed:
+    - name: webapp-mongodb-credentials
+      remotePath: webapp/qualif/mongodb
+      keys: [root-username, root-password, app-username, app-password, metrics-username, metrics-password]
+    - name: webapp-saml-sp
+      remotePath: webapp/qualif/saml-sp
+      keys: [sp.key, sp.crt, idp-metadata.xml]
+
+scalability:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+
+istio:
+  enabled: true
+  partner:
+    host: partner-api-sandbox.example.org
+    credentialName: partner-api-client-cert-qualif
+  corporateProxy:
+    host: proxy.corp.example
+    port: 3128
+    address: 192.0.2.10

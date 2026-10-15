@@ -1,0 +1,104 @@
+# PROD - autoscaling, mesh egress, Vault-synchronised secrets, full alerting.
+# Deployed by Argo CD with manual sync only (see argocd/applicationset.yaml).
+global:
+  environment: prod
+
+exposure:
+  type: route
+  host: app.example.org
+
+frontend:
+  cors:
+    allowedOrigins:
+      - https://app.example.org
+  resources:
+    requests: {cpu: 200m, memory: 128Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: webapp
+          app.kubernetes.io/component: frontend
+
+authProxy:
+  saml:
+    spEntityId: https://app.example.org/mellon/metadata
+  resources:
+    requests: {cpu: 200m, memory: 192Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+backend:
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits: {cpu: "2", memory: 1Gi}
+  env:
+    - name: NODE_ENV
+      value: production
+    - name: LOG_LEVEL
+      value: warn
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: webapp
+          app.kubernetes.io/component: backend
+
+mongodb:
+  persistence:
+    size: 50Gi
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {cpu: "2", memory: 4Gi}
+  wiredTigerCacheSizeGB: 1.5
+
+secrets:
+  provider: vaultStaticSecret
+  vault:
+    mount: kv
+    type: kv-v2
+    vaultAuthRef: vault-auth
+    refreshAfter: 15m
+  managed:
+    - name: webapp-mongodb-credentials
+      remotePath: webapp/prod/mongodb
+      keys: [root-username, root-password, app-username, app-password, metrics-username, metrics-password]
+    - name: webapp-saml-sp
+      remotePath: webapp/prod/saml-sp
+      keys: [sp.key, sp.crt, idp-metadata.xml]
+
+scalability:
+  enabled: true
+  hpa:
+    components:
+      frontend: {minReplicas: 2, maxReplicas: 5}
+      authProxy: {minReplicas: 2, maxReplicas: 4}
+      backend: {minReplicas: 2, maxReplicas: 5}
+  vpa:
+    enabled: true
+    updateMode: "Off"
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+
+istio:
+  enabled: true
+  partner:
+    host: partner-api.example.org
+    credentialName: partner-api-client-cert
+  corporateProxy:
+    host: proxy.corp.example
+    port: 3128
+    address: 192.0.2.10

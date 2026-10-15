@@ -1,0 +1,76 @@
+# DEV - fast feedback, minimal footprint.
+# Single replicas, no autoscaling, no mesh: the backend reaches the partner
+# sandbox through the corporate proxy configured in the application itself.
+global:
+  environment: dev
+
+exposure:
+  type: route
+  host: app-dev.example.org
+
+frontend:
+  replicaCount: 1
+  cors:
+    allowedOrigins:
+      - https://app-dev.example.org
+      - http://localhost:4200
+
+authProxy:
+  replicaCount: 1
+  saml:
+    spEntityId: https://app-dev.example.org/mellon/metadata
+
+backend:
+  replicaCount: 1
+  partnerApi:
+    url: https://partner-api-sandbox.example.org
+  env:
+    - name: NODE_ENV
+      value: development
+    - name: LOG_LEVEL
+      value: debug
+    # Without the mesh, the app goes through the proxy itself.
+    - name: HTTPS_PROXY
+      value: http://proxy.corp.example:3128
+    - name: NO_PROXY
+      value: .svc,.cluster.local,localhost,127.0.0.1
+    # Trust the corporate CA instead of disabling TLS verification.
+    - name: NODE_EXTRA_CA_CERTS
+      value: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+mongodb:
+  persistence:
+    size: 2Gi
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+  wiredTigerCacheSizeGB: 0.25
+
+secrets:
+  provider: existingSecret
+
+scalability:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: false
+  grafanaDashboard:
+    enabled: false
+
+networkPolicy:
+  enabled: true
+  egress:
+    restrict: true
+    # Corporate proxy (RFC 5737 documentation address - replace per site).
+    extraRules:
+      - to:
+          - ipBlock:
+              cidr: 192.0.2.10/32
+        ports:
+          - {port: 3128, protocol: TCP}
+
+istio:
+  enabled: false

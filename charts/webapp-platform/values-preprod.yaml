@@ -1,0 +1,83 @@
+# PREPROD - production-like: same topology, autoscaling and mesh as PROD.
+# Load tests (docs/scalability-strategy.md) run here.
+global:
+  environment: preprod
+
+exposure:
+  type: route
+  host: app-preprod.example.org
+
+frontend:
+  cors:
+    allowedOrigins:
+      - https://app-preprod.example.org
+  resources:
+    requests: {cpu: 100m, memory: 96Mi}
+    limits: {cpu: 500m, memory: 192Mi}
+
+authProxy:
+  saml:
+    spEntityId: https://app-preprod.example.org/mellon/metadata
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+
+backend:
+  resources:
+    requests: {cpu: 250m, memory: 384Mi}
+    limits: {cpu: "1", memory: 768Mi}
+
+mongodb:
+  persistence:
+    size: 20Gi
+  resources:
+    requests: {cpu: 250m, memory: 1Gi}
+    limits: {cpu: "1", memory: 2Gi}
+  wiredTigerCacheSizeGB: 0.5
+
+secrets:
+  provider: vaultStaticSecret
+  vault:
+    mount: kv
+    type: kv-v2
+    vaultAuthRef: vault-auth
+    refreshAfter: 30m
+  managed:
+    - name: webapp-mongodb-credentials
+      remotePath: webapp/preprod/mongodb
+      keys: [root-username, root-password, app-username, app-password, metrics-username, metrics-password]
+    - name: webapp-saml-sp
+      remotePath: webapp/preprod/saml-sp
+      keys: [sp.key, sp.crt, idp-metadata.xml]
+
+scalability:
+  enabled: true
+  hpa:
+    components:
+      frontend: {minReplicas: 2, maxReplicas: 5}
+      authProxy: {minReplicas: 2, maxReplicas: 4}
+      backend: {minReplicas: 2, maxReplicas: 5}
+  vpa:
+    enabled: true
+    updateMode: "Off"
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+
+istio:
+  enabled: true
+  partner:
+    host: partner-api-preprod.example.org
+    credentialName: partner-api-client-cert-preprod
+  corporateProxy:
+    host: proxy.corp.example
+    port: 3128
+    address: 192.0.2.10
