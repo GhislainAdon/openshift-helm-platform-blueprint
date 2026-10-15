@@ -1,0 +1,65 @@
+{{- /*
+External exposure of the entrypoint component (auth proxy by default).
+exposure.type = route   -> OpenShift Route (TLS edge, HTTP -> HTTPS redirect)
+exposure.type = ingress -> networking.k8s.io/v1 Ingress
+exposure.type = none    -> nothing (e.g. exposed by a shared gateway)
+*/}}
+{{- $target := .Values.exposure.targetComponent }}
+{{- $targetValues := index .Values $target }}
+{{- $svc := include "webapp.componentName" (dict "root" $ "component" $target) }}
+{{- if and $targetValues.enabled (eq .Values.exposure.type "route") }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "webapp.fullname" . }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+  {{- with .Values.exposure.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  host: {{ required "exposure.host is required" .Values.exposure.host }}
+  to:
+    kind: Service
+    name: {{ $svc }}
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    {{- toYaml .Values.exposure.route.tls | nindent 4 }}
+  wildcardPolicy: None
+{{- else if and $targetValues.enabled (eq .Values.exposure.type "ingress") }}
+{{- $tlsSecret := .Values.exposure.ingress.tls.secretName | default (printf "%s-tls" (include "webapp.fullname" .)) }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "webapp.fullname" . }}
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+  {{- with .Values.exposure.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.exposure.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.exposure.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.exposure.host | quote }}
+      secretName: {{ $tlsSecret }}
+  {{- end }}
+  rules:
+    - host: {{ required "exposure.host is required" .Values.exposure.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svc }}
+                port:
+                  name: http
+{{- end }}

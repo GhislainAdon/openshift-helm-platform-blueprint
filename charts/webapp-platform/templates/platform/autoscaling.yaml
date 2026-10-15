@@ -1,0 +1,92 @@
+{{- /*
+Autoscaling, gated by scalability.enabled.
+
+- HPA (autoscaling/v2) for the stateless Deployments only. The target kind is
+  always Deployment and the name comes from the same helper used by the
+  Deployment itself, so the two can never drift apart.
+- MongoDB is intentionally excluded: horizontally scaling a standalone mongod
+  StatefulSet creates independent, divergent databases.
+- VPA in "Off" (recommendation) mode by default so it never fights the HPA on
+  CPU / memory.
+- PDB keeps at least one replica during voluntary disruptions (node drains).
+*/}}
+{{- if .Values.scalability.enabled }}
+{{- $hpa := .Values.scalability.hpa }}
+{{- range $component, $cfg := $hpa.components }}
+{{- $v := index $.Values $component }}
+{{- if and $v $v.enabled }}
+{{- $ctx := dict "root" $ "component" $component }}
+{{- $name := include "webapp.componentName" $ctx }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ $cfg.minReplicas }}
+  maxReplicas: {{ $cfg.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $hpa.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $hpa.targetMemoryUtilizationPercentage }}
+  behavior:
+    {{- toYaml $hpa.behavior | nindent 4 }}
+{{- if $.Values.scalability.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.scalability.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "webapp.componentSelectorLabels" $ctx | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.scalability.vpa.enabled }}
+{{- range $component := list "frontend" "authProxy" "backend" "mongodb" }}
+{{- $v := index $.Values $component }}
+{{- if $v.enabled }}
+{{- $ctx := dict "root" $ "component" $component }}
+{{- $name := include "webapp.componentName" $ctx }}
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "webapp.componentLabels" $ctx | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: {{ ternary "StatefulSet" "Deployment" (eq $component "mongodb") }}
+    name: {{ $name }}
+  updatePolicy:
+    updateMode: {{ $.Values.scalability.vpa.updateMode | quote }}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: {{ include "webapp.componentSlug" $component }}
+        controlledResources: ["cpu", "memory"]
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,130 @@
+{{- /*
+Network isolation model (scoped to this release's pods, not the whole namespace):
+  1. default-deny-ingress   : nothing gets in unless explicitly allowed
+  2. allow-from-router      : ingress controller / OpenShift router -> entrypoint
+  3. allow-intra-app        : pods of this release can talk to each other
+  4. allow-from-monitoring  : Prometheus -> metrics ports
+  5. restrict-egress        : DNS + intra-app (+ mesh control plane / egress
+                              gateway when Istio is on) + explicit extra rules
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $fullname := include "webapp.fullname" . }}
+{{- $entry := .Values.exposure.targetComponent }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny-ingress
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "webapp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-from-router
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "webapp.componentSelectorLabels" (dict "root" $ "component" $entry) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.ingressNamespaceSelector | nindent 12 }}
+      ports:
+        - port: http
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-intra-app
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "webapp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "webapp.selectorLabels" . | nindent 14 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-from-monitoring
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "webapp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.monitoringNamespaceSelector | nindent 12 }}
+      ports:
+        - port: metrics
+          protocol: TCP
+        - port: http
+          protocol: TCP
+{{- if $np.egress.restrict }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-restrict-egress
+  labels:
+    {{- include "webapp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "webapp.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS
+    - to:
+        - namespaceSelector:
+            {{- toYaml $np.egress.dns.namespaceSelector | nindent 12 }}
+      ports:
+        {{- toYaml $np.egress.dns.ports | nindent 8 }}
+    # Other pods of this release (auth-proxy -> frontend -> backend -> mongodb)
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "webapp.selectorLabels" . | nindent 14 }}
+    {{- if .Values.istio.enabled }}
+    # Istio control plane (xDS / CA) and egress gateway. The partner API and the
+    # corporate proxy are NOT reachable directly: only via the egress gateway.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.istio.controlPlaneNamespace }}
+    {{- if ne .Values.istio.egressGateway.namespace .Values.istio.controlPlaneNamespace }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.istio.egressGateway.namespace }}
+    {{- end }}
+    {{- end }}
+    {{- with $np.egress.extraRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}
